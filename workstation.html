@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>仙女工作台</title>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.20.1/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#eef3fb; --card:#ffffff; --primary:#5b8ac6; --primary-light:#e8f0fb;
@@ -1265,6 +1265,7 @@ function handleExcelFile(file){
   var reader=new FileReader();
   reader.onload=function(e){
     try{
+      if(typeof XLSX==='undefined'){showImportError('Excel解析库加载失败（网络问题），请刷新页面重试，或把文件另存为CSV再上传');event.target.value='';return;}
       var data=new Uint8Array(e.target.result);
       var wb=XLSX.read(data,{type:'array'});
       var sheetName=wb.SheetNames[0];
