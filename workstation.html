@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>仙女工作台</title>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#eef3fb; --card:#ffffff; --primary:#5b8ac6; --primary-light:#e8f0fb;
@@ -468,7 +469,7 @@ body.edit-mode .edit-banner{display:block;}
       <div class="tip-content editable-block" data-eid="csv_import_tips">
         <b>微信：</b>我 → 服务 → 钱包 → 账单 → 右上角常见问题 → 下载账单 → 用于个人对账<br>
         <b>支付宝：</b>我的 → 账单 → 右下角"..." → 开具交易流水证明 → 用于个人对账<br>
-        收到CSV文件后，点下面按钮上传，自动解析+分类+记账
+        收到CSV/Excel文件后，点下面按钮上传，自动解析+分类+记账。也支持银行卡导出的Excel账单
       </div>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:10px;">
@@ -476,10 +477,10 @@ body.edit-mode .edit-banner{display:block;}
       <div onclick="openApp(event,'alipays://platformapi/startapp?appId=20000056','https://render.alipay.com/')" style="flex:1;text-align:center;padding:10px;border-radius:10px;background:#1677ff;color:#fff;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;">💰 打开支付宝账单</div>
     </div>
     <div style="font-size:11px;color:var(--text-light);margin-bottom:10px;line-height:1.5;">
-      ⚡ 微信和支付宝不开放账单接口给第三方，没法自动拉数据。但点上面按钮能直接跳进APP去导账单，导完CSV传上来就行——比手动翻记录快多了。
+      ⚡ 微信和支付宝不开放账单接口给第三方，没法自动拉数据。但点上面按钮能直接跳进APP去导账单，导完CSV或Excel传上来就行——比手动翻记录快多了。
     </div>
-    <input type="file" id="csvFile" accept=".csv,text/csv" style="display:none;" onchange="handleCSVUpload(event)">
-    <button class="btn btn-outline btn-full" onclick="document.getElementById('csvFile').click()">📁 选择账单CSV文件</button>
+    <input type="file" id="csvFile" accept=".csv,.xlsx,.xls" style="display:none;" onchange="handleFileUpload(event)">
+    <button class="btn btn-outline btn-full" onclick="document.getElementById('csvFile').click()">📁 选择账单文件（支持CSV/Excel）</button>
     <div id="importResult" style="margin-top:10px;"></div>
   </div>
 
@@ -1247,29 +1248,119 @@ function parseCSVLine(line){
   result.push(current.trim());
   return result;
 }
-function handleCSVUpload(event){
+function handleFileUpload(event){
   var file=event.target.files[0];
   if(!file)return;
+  var ext=(file.name||'').split('.').pop().toLowerCase();
   document.getElementById('importResult').innerHTML='<div style="color:var(--text-light);font-size:13px;">正在解析中...</div>';
+  if(ext==='xlsx'||ext==='xls'){
+    handleExcelFile(file);
+  }else{
+    handleCSVFile(file);
+  }
+}
+
+// ========== Excel 账单解析（微信/银行卡通用） ==========
+function handleExcelFile(file){
+  var reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      var data=new Uint8Array(e.target.result);
+      var wb=XLSX.read(data,{type:'array'});
+      var sheetName=wb.SheetNames[0];
+      var sheet=wb.Sheets[sheetName];
+      var rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',blankrows:false});
+      if(!rows||rows.length===0){showImportError('文件为空，请检查');event.target.value='';return;}
+
+      // 找表头行：包含"交易时间"和"收/支"和"交易对方"
+      var headerIdx=-1,headers=null;
+      for(var i=0;i<Math.min(rows.length,50);i++){
+        var r=rows[i];
+        if(!r||!r.length)continue;
+        var line=r.map(function(c){return String(c||'');}).join(' ');
+        if(line.indexOf('交易时间')>=0&&line.indexOf('收/支')>=0&&line.indexOf('交易对方')>=0){
+          headers=r.map(function(c){return String(c||'').trim();});
+          headerIdx=i;break;
+        }
+      }
+      if(headerIdx<0){showImportError('没找到账单表头，这不是微信/支付宝账单格式？');event.target.value='';return;}
+
+      // 建列映射
+      var colMap={};
+      headers.forEach(function(h,idx){
+        var hn=h.replace(/\s/g,'').replace(/（/g,'(').replace(/）/g,')');
+        if(hn==='交易时间')colMap.date=idx;
+        if(hn==='交易对方')colMap.merchant=idx;
+        if(hn==='商品')colMap.product=idx;
+        if(hn.indexOf('金额')>=0)colMap.amount=idx;
+        if(hn==='收/支')colMap.type=idx;
+      });
+
+      // 解析数据行
+      var imported=0,skipped=0,si={transfer:0,dup:0,invalid:0},byMonth={};
+      for(var i=headerIdx+1;i<rows.length;i++){
+        var r=rows[i];
+        if(!r||!r.length)continue;
+        var typeStr=(r[colMap.type]||'').toString().trim();
+        if(typeStr!=='支出'&&typeStr!=='收入'){skipped++;si.transfer++;continue;}
+
+        var dateStr=(r[colMap.date]||'').toString().trim();
+        var dateMatch=dateStr.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+        if(!dateMatch){skipped++;si.invalid++;continue;}
+        var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
+        var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
+
+        var amountStr=(r[colMap.amount]||'').toString().replace(/[¥￥,\s元]/g,'');
+        var amount=parseFloat(amountStr);
+        if(!amount||amount<=0){skipped++;si.invalid++;continue;}
+
+        var merchant=(r[colMap.merchant]||'').toString().trim();
+        var product=(r[colMap.product]||'').toString().trim();
+        var cat=autoCategorize(merchant,product);
+        var note=(product||merchant||'导入记录').substring(0,20);
+
+        var monExps=getData('expenses_'+monthKey,[]);
+        var isDup=monExps.some(function(e){
+          return e.date===dayKey&&Math.abs(e.amount-amount)<0.01&&(e.note||'').indexOf(note.substring(0,8))>=0;
+        });
+        if(isDup){skipped++;si.dup++;continue;}
+
+        monExps.push({
+          amount:amount,cat:cat,note:note,
+          type:typeStr==='收入'?'income':'expense',
+          date:dayKey,time:new Date(dateStr).getTime()||Date.now(),
+          source:'excel'
+        });
+        setData('expenses_'+monthKey,monExps);
+        imported++;
+        byMonth[monthKey]=(byMonth[monthKey]||0)+1;
+      }
+
+      showImportResult(imported,skipped,si,byMonth);
+      event.target.value='';
+    }catch(err){
+      showImportError('Excel解析出错：'+err.message);
+      event.target.value='';
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ========== CSV 账单解析 ==========
+function handleCSVFile(file){
   var reader=new FileReader();
   reader.onload=function(e){
     var buffer=e.target.result;
     var uint8=new Uint8Array(buffer);
-    // 检测编码
     var encoding='utf-8';
-    if(uint8[0]===0xEF&&uint8[1]===0xBB&&uint8[2]===0xBF){
-      encoding='utf-8';
-    }else{
-      try{
-        new TextDecoder('utf-8',{fatal:true}).decode(uint8);
-        encoding='utf-8';
-      }catch(err){encoding='gbk';}
+    if(!(uint8[0]===0xEF&&uint8[1]===0xBB&&uint8[2]===0xBF)){
+      try{new TextDecoder('utf-8',{fatal:true}).decode(uint8);encoding='utf-8';}
+      catch(err){encoding='gbk';}
     }
     var text=new TextDecoder(encoding).decode(uint8);
     if(text.charCodeAt(0)===0xFEFF)text=text.slice(1);
     var lines=text.split(/\r\n|\n|\r/);
 
-    // 检测格式和表头位置
     var format=null,headerIdx=-1,headers=null;
     for(var i=0;i<Math.min(lines.length,30);i++){
       var line=lines[i].trim();
@@ -1278,18 +1369,12 @@ function handleCSVUpload(event){
         headers=parseCSVLine(line);
         if(line.indexOf('交易号')>=0&&line.indexOf('商品名称')>=0){format='alipay';headerIdx=i;break;}
         if(line.indexOf('交易时间')>=0&&line.indexOf('商品')>=0){format='wechat';headerIdx=i;break;}
-        // 兜底：有收/支和交易对方就尝试解析
         if(line.indexOf('交易时间')>=0){format='wechat';headerIdx=i;break;}
         format='alipay';headerIdx=i;break;
       }
     }
+    if(!format){showImportError('没认出来这是微信还是支付宝的账单。确认一下导出的是"用于个人对账"的CSV文件？');event.target.value='';return;}
 
-    if(!format){
-      document.getElementById('importResult').innerHTML='<div style="color:var(--danger);font-size:13px;">❌ 没认出来这是微信还是支付宝的账单。确认一下导出的是"用于个人对账"的CSV文件？</div>';
-      event.target.value='';return;
-    }
-
-    // 找到各列的位置
     var colMap={};
     headers.forEach(function(h,idx){
       var hn=h.replace(/\s/g,'').replace(/（/g,'(').replace(/）/g,')');
@@ -1308,78 +1393,69 @@ function handleCSVUpload(event){
       }
     });
 
-    // 解析数据行
-    var imported=0,skipped=0,skippedReason={transfer:0,dup:0,invalid:0};
-    var importedByMonth={};
-
+    var imported=0,skipped=0,si={transfer:0,dup:0,invalid:0},byMonth={};
     for(var i=headerIdx+1;i<lines.length;i++){
       var line=lines[i].trim();
-      if(!line||line.indexOf('---')>=0||line.indexOf('----')>=0||line.indexOf('汇总')>=0)break;
-      // 跳过统计行
+      if(!line||line.indexOf('---')>=0||line.indexOf('汇总')>=0)break;
       if(line.indexOf('本期')>=0||line.indexOf('笔数')>=0||line.indexOf('导出')>=0)continue;
-
       var fields=parseCSVLine(line);
-      if(fields.length<5){skipped++;skippedReason.invalid++;continue;}
-
+      if(fields.length<5){skipped++;si.invalid++;continue;}
       var typeStr=(fields[colMap.type]||'').trim();
-      if(typeStr!=='支出'&&typeStr!=='收入'){skipped++;skippedReason.transfer++;continue;}
-
+      if(typeStr!=='支出'&&typeStr!=='收入'){skipped++;si.transfer++;continue;}
       var dateStr=(fields[colMap.date]||'').trim();
       var dateMatch=dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-      if(!dateMatch){skipped++;skippedReason.invalid++;continue;}
+      if(!dateMatch){skipped++;si.invalid++;continue;}
       var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
       var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
-
       var amountStr=(fields[colMap.amount]||'').replace(/[¥￥,\s元]/g,'');
       var amount=parseFloat(amountStr);
-      if(!amount||amount<=0){skipped++;skippedReason.invalid++;continue;}
-
+      if(!amount||amount<=0){skipped++;si.invalid++;continue;}
       var merchant=(fields[colMap.merchant]||'').trim();
       var product=(fields[colMap.product]||'').trim();
       var cat=autoCategorize(merchant,product);
-      var note=product||merchant||'导入记录';
-      if(note.length>20)note=note.substring(0,20)+'...';
-
-      var monthExpenses=getData('expenses_'+monthKey,[]);
-      // 去重检查
-      var isDup=monthExpenses.some(function(e){
+      var note=(product||merchant||'导入记录').substring(0,20);
+      var monExps=getData('expenses_'+monthKey,[]);
+      var isDup=monExps.some(function(e){
         return e.date===dayKey&&Math.abs(e.amount-amount)<0.01&&(e.note||'').indexOf(note.substring(0,8))>=0;
       });
-      if(isDup){skipped++;skippedReason.dup++;continue;}
-
-      monthExpenses.push({
+      if(isDup){skipped++;si.dup++;continue;}
+      monExps.push({
         amount:amount,cat:cat,note:note,
         type:typeStr==='收入'?'income':'expense',
-        date:dayKey,time:Date.parse(dateStr)||Date.now(),
-        source:format
+        date:dayKey,time:Date.parse(dateStr)||Date.now(),source:'csv'
       });
-      setData('expenses_'+monthKey,monthExpenses);
+      setData('expenses_'+monthKey,monExps);
       imported++;
-      importedByMonth[monthKey]=(importedByMonth[monthKey]||0)+1;
+      byMonth[monthKey]=(byMonth[monthKey]||0)+1;
     }
-
-    var monthList=Object.keys(importedByMonth);
-    var resultHtml='<div style="color:var(--secondary);font-size:13px;line-height:1.7;">'+
-      '✅ 导入成功！共 <b>'+imported+'</b> 条记录';
-    if(skipped>0){
-      resultHtml+='，跳过 <b>'+skipped+'</b> 条';
-      var reasons=[];
-      if(skippedReason.transfer)reasons.push('转账/不计收支 '+skippedReason.transfer);
-      if(skippedReason.dup)reasons.push('重复记录 '+skippedReason.dup);
-      if(skippedReason.invalid)reasons.push('格式异常 '+skippedReason.invalid);
-      if(reasons.length)resultHtml+='（'+reasons.join('、')+'）';
-    }
-    if(monthList.length>0){
-      resultHtml+='<br>📅 涉及月份：'+monthList.map(function(m){return m+'（'+importedByMonth[m]+'条）';}).join('、');
-    }
-    resultHtml+='</div>';
-    document.getElementById('importResult').innerHTML=resultHtml;
-
-    renderExpenses();
-    updateOverview();
+    showImportResult(imported,skipped,si,byMonth);
     event.target.value='';
   };
   reader.readAsArrayBuffer(file);
+}
+
+// ========== 共用导入结果展示 ==========
+function showImportResult(imported,skipped,si,byMonth){
+  var monthList=Object.keys(byMonth);
+  var html='<div style="color:var(--secondary);font-size:13px;line-height:1.7;">✅ 导入成功！共 <b>'+imported+'</b> 条记录';
+  if(skipped>0){
+    html+='，跳过 <b>'+skipped+'</b> 条';
+    var reasons=[];
+    if(si.transfer)reasons.push('转账/不计收支 '+si.transfer);
+    if(si.dup)reasons.push('重复记录 '+si.dup);
+    if(si.invalid)reasons.push('格式异常 '+si.invalid);
+    if(reasons.length)html+='（'+reasons.join('、')+'）';
+  }
+  if(monthList.length>0){
+    html+='<br>📅 涉及月份：'+monthList.map(function(m){return m+'（'+byMonth[m]+'条）';}).join('、');
+  }
+  html+='</div>';
+  document.getElementById('importResult').innerHTML=html;
+  renderExpenses();
+  updateOverview();
+}
+function showImportError(msg){
+  document.getElementById('importResult').innerHTML='<div style="color:var(--danger);font-size:13px;">❌ '+msg+'</div>';
 }
 
 // ========== 短视频创作 ==========
