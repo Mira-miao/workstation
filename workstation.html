@@ -1248,6 +1248,32 @@ function parseCSVLine(line){
   result.push(current.trim());
   return result;
 }
+// ========== 通用日期解析（兼容手机端格式变化） ==========
+function parseBillDate(raw){
+  var s=String(raw||'').trim();
+  if(!s)return null;
+  // 1. 标准格式: 2026-07-25 / 2026/07/25 / 2026.07.25
+  var m=s.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+  if(m)return {y:m[1],M:m[2].padStart(2,'0'),d:m[3].padStart(2,'0'),full:m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0')};
+  // 2. 中文格式: 2026年7月25日 / 2026年07月25日
+  m=s.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+  if(m)return {y:m[1],M:m[2].padStart(2,'0'),d:m[3].padStart(2,'0'),full:m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0')};
+  // 3. Excel序列号（手机端常见：日期变成数字，如45152代表2026-07-25附近）
+  var num=parseFloat(s);
+  if(num>44000&&num<50000){
+    // Excel日期序列号：1900-01-01 = 1，但Excel有个bug把1900当闰年
+    var jsDate=new Date(Math.round((num-25569)*86400*1000));
+    if(!isNaN(jsDate.getTime())){
+      var y=jsDate.getFullYear(),M=String(jsDate.getMonth()+1).padStart(2,'0'),d=String(jsDate.getDate()).padStart(2,'0');
+      return {y:String(y),M:M,d:d,full:y+'-'+M+'-'+d};
+    }
+  }
+  // 4. 月/日/年: 7/25/2026
+  m=s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(m)return {y:m[3],M:m[1].padStart(2,'0'),d:m[2].padStart(2,'0'),full:m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0')};
+  return null;
+}
+
 function handleFileUpload(event){
   var file=event.target.files[0];
   if(!file)return;
@@ -1316,14 +1342,14 @@ function handleExcelFile(file){
           continue;
         }
 
-        var dateMatch=dateStr.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-        if(!dateMatch){
+        var parsed=parseBillDate(dateStr);
+        if(!parsed){
           skipped++;si.invalid++;
-          invalidRows.push({行号:rowNum,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStr,收或支:typeStr,异常原因:'日期格式无法识别（需要2026-07-25这样的格式）'});
+          invalidRows.push({行号:rowNum,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStr,收或支:typeStr,异常原因:'日期格式无法识别（当前值：'+dateStr+'）'});
           continue;
         }
-        var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
-        var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
+        var monthKey=parsed.y+'-'+parsed.M;
+        var dayKey=parsed.full;
 
         var amount=parseFloat(amountStr);
         if(!amount||amount<=0){
@@ -1431,14 +1457,14 @@ function handleCSVFile(file){
         invalidRows.push({行号:i+1,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStrRaw,收或支:typeStr,异常原因:'收/支列为空或不是"支出/收入"（可能是转账等不计收支）'});
         continue;
       }
-      var dateMatch=dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-      if(!dateMatch){
+      var parsed=parseBillDate(dateStr);
+      if(!parsed){
         skipped++;si.invalid++;
-        invalidRows.push({行号:i+1,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStrRaw,收或支:typeStr,异常原因:'日期格式无法识别（需要2026-07-25这样的格式）'});
+        invalidRows.push({行号:i+1,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStrRaw,收或支:typeStr,异常原因:'日期格式无法识别（当前值：'+dateStr+'）'});
         continue;
       }
-      var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
-      var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
+      var monthKey=parsed.y+'-'+parsed.M;
+      var dayKey=parsed.full;
       var amountStr=amountStrRaw.replace(/[¥￥,\s元]/g,'');
       var amount=parseFloat(amountStr);
       if(!amount||amount<=0){
