@@ -1299,24 +1299,38 @@ function handleExcelFile(file){
 
       // 解析数据行
       var imported=0,skipped=0,si={transfer:0,dup:0,invalid:0},byMonth={};
+      var invalidRows=[];
       for(var i=headerIdx+1;i<rows.length;i++){
         var r=rows[i];
         if(!r||!r.length)continue;
+        var rowNum=i+1; // Excel行号（1-based）
         var typeStr=(r[colMap.type]||'').toString().trim();
-        if(typeStr!=='支出'&&typeStr!=='收入'){skipped++;si.transfer++;continue;}
-
         var dateStr=(r[colMap.date]||'').toString().trim();
+        var merchant=(r[colMap.merchant]||'').toString().trim();
+        var product=(r[colMap.product]||'').toString().trim();
+        var amountStr=(r[colMap.amount]||'').toString().replace(/[¥￥,\s元]/g,'');
+
+        if(typeStr!=='支出'&&typeStr!=='收入'){
+          skipped++;si.transfer++;
+          invalidRows.push({行号:rowNum,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStr,收或支:typeStr,异常原因:'收/支列为空或不是"支出/收入"（可能是转账、退款等不计收支的记录）'});
+          continue;
+        }
+
         var dateMatch=dateStr.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-        if(!dateMatch){skipped++;si.invalid++;continue;}
+        if(!dateMatch){
+          skipped++;si.invalid++;
+          invalidRows.push({行号:rowNum,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStr,收或支:typeStr,异常原因:'日期格式无法识别（需要2026-07-25这样的格式）'});
+          continue;
+        }
         var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
         var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
 
-        var amountStr=(r[colMap.amount]||'').toString().replace(/[¥￥,\s元]/g,'');
         var amount=parseFloat(amountStr);
-        if(!amount||amount<=0){skipped++;si.invalid++;continue;}
-
-        var merchant=(r[colMap.merchant]||'').toString().trim();
-        var product=(r[colMap.product]||'').toString().trim();
+        if(!amount||amount<=0){
+          skipped++;si.invalid++;
+          invalidRows.push({行号:rowNum,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStr,收或支:typeStr,异常原因:'金额为空、0或无法解析为数字'});
+          continue;
+        }
         var cat=autoCategorize(merchant,product);
         var note=(product||merchant||'导入记录').substring(0,20);
 
@@ -1337,7 +1351,7 @@ function handleExcelFile(file){
         byMonth[monthKey]=(byMonth[monthKey]||0)+1;
       }
 
-      showImportResult(imported,skipped,si,byMonth);
+      showImportResult(imported,skipped,si,byMonth,invalidRows);
       event.target.value='';
     }catch(err){
       showImportError('Excel解析出错：'+err.message);
@@ -1395,24 +1409,43 @@ function handleCSVFile(file){
     });
 
     var imported=0,skipped=0,si={transfer:0,dup:0,invalid:0},byMonth={};
+    var invalidRows=[];
     for(var i=headerIdx+1;i<lines.length;i++){
       var line=lines[i].trim();
       if(!line||line.indexOf('---')>=0||line.indexOf('汇总')>=0)break;
       if(line.indexOf('本期')>=0||line.indexOf('笔数')>=0||line.indexOf('导出')>=0)continue;
       var fields=parseCSVLine(line);
-      if(fields.length<5){skipped++;si.invalid++;continue;}
+      if(fields.length<5){
+        skipped++;si.invalid++;
+        invalidRows.push({行号:i+1,交易时间:'',交易对方:'',商品:'','金额(原始)':'',收或支:'',异常原因:'列数不足5列，可能不是数据行'});
+        continue;
+      }
       var typeStr=(fields[colMap.type]||'').trim();
-      if(typeStr!=='支出'&&typeStr!=='收入'){skipped++;si.transfer++;continue;}
       var dateStr=(fields[colMap.date]||'').trim();
-      var dateMatch=dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-      if(!dateMatch){skipped++;si.invalid++;continue;}
-      var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
-      var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
-      var amountStr=(fields[colMap.amount]||'').replace(/[¥￥,\s元]/g,'');
-      var amount=parseFloat(amountStr);
-      if(!amount||amount<=0){skipped++;si.invalid++;continue;}
       var merchant=(fields[colMap.merchant]||'').trim();
       var product=(fields[colMap.product]||'').trim();
+      var amountStrRaw=(fields[colMap.amount]||'').trim();
+
+      if(typeStr!=='支出'&&typeStr!=='收入'){
+        skipped++;si.transfer++;
+        invalidRows.push({行号:i+1,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStrRaw,收或支:typeStr,异常原因:'收/支列为空或不是"支出/收入"（可能是转账等不计收支）'});
+        continue;
+      }
+      var dateMatch=dateStr.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+      if(!dateMatch){
+        skipped++;si.invalid++;
+        invalidRows.push({行号:i+1,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStrRaw,收或支:typeStr,异常原因:'日期格式无法识别（需要2026-07-25这样的格式）'});
+        continue;
+      }
+      var monthKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0');
+      var dayKey=dateMatch[1]+'-'+dateMatch[2].padStart(2,'0')+'-'+dateMatch[3].padStart(2,'0');
+      var amountStr=amountStrRaw.replace(/[¥￥,\s元]/g,'');
+      var amount=parseFloat(amountStr);
+      if(!amount||amount<=0){
+        skipped++;si.invalid++;
+        invalidRows.push({行号:i+1,交易时间:dateStr,交易对方:merchant,商品:product,'金额(原始)':amountStrRaw,收或支:typeStr,异常原因:'金额为空、0或无法解析为数字'});
+        continue;
+      }
       var cat=autoCategorize(merchant,product);
       var note=(product||merchant||'导入记录').substring(0,20);
       var monExps=getData('expenses_'+monthKey,[]);
@@ -1429,14 +1462,14 @@ function handleCSVFile(file){
       imported++;
       byMonth[monthKey]=(byMonth[monthKey]||0)+1;
     }
-    showImportResult(imported,skipped,si,byMonth);
+    showImportResult(imported,skipped,si,byMonth,invalidRows);
     event.target.value='';
   };
   reader.readAsArrayBuffer(file);
 }
 
 // ========== 共用导入结果展示 ==========
-function showImportResult(imported,skipped,si,byMonth){
+function showImportResult(imported,skipped,si,byMonth,invalidRows){
   var monthList=Object.keys(byMonth);
   var html='<div style="color:var(--secondary);font-size:13px;line-height:1.7;">✅ 导入成功！共 <b>'+imported+'</b> 条记录';
   if(skipped>0){
@@ -1450,10 +1483,32 @@ function showImportResult(imported,skipped,si,byMonth){
   if(monthList.length>0){
     html+='<br>📅 涉及月份：'+monthList.map(function(m){return m+'（'+byMonth[m]+'条）';}).join('、');
   }
+  // 如果有异常记录，显示下载按钮
+  if(invalidRows&&invalidRows.length>0){
+    html+='<br><button onclick="downloadErrorExcel()" style="margin-top:8px;padding:6px 14px;background:var(--primary);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">📥 下载异常明细（'+invalidRows.length+'条）</button>';
+    html+='<div style="font-size:11px;color:var(--text-light);margin-top:4px;">包含每条异常记录的原始数据 + 具体原因</div>';
+    window._lastInvalidRows=invalidRows;
+  }
   html+='</div>';
   document.getElementById('importResult').innerHTML=html;
   renderExpenses();
   updateOverview();
+}
+function downloadErrorExcel(){
+  if(!window._lastInvalidRows||!window._lastInvalidRows.length)return;
+  if(typeof XLSX==='undefined'){alert('Excel导出库加载失败，请刷新页面重试');return;}
+  var rows=window._lastInvalidRows;
+  var headers=['行号','交易时间','交易对方','商品','金额(原始)','收或支','异常原因'];
+  var sheetData=[headers];
+  rows.forEach(function(r){
+    sheetData.push([r['行号']||'',r['交易时间']||'',r['交易对方']||'',r['商品']||'',r['金额(原始)']||'',r['收或支']||'',r['异常原因']||'']);
+  });
+  var ws=XLSX.utils.aoa_to_sheet(sheetData);
+  // 设置列宽
+  ws['!cols']=[{wch:6},{wch:22},{wch:20},{wch:20},{wch:14},{wch:8},{wch:50}];
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'导入异常明细');
+  XLSX.writeFile(wb,'导入异常明细.xlsx');
 }
 function showImportError(msg){
   document.getElementById('importResult').innerHTML='<div style="color:var(--danger);font-size:13px;">❌ '+msg+'</div>';
